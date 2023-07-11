@@ -14,7 +14,7 @@
 #CXX = g++
 #CXX = clang++
 
-EXE = serial2
+EXE = serial_monitor
 IMPLOT_DIR = implot
 IMGUI_DIR = imgui
 SOURCES = main.cpp monitor.cpp
