@@ -13,19 +13,44 @@
 #include "implot.h"
 #include "monitor.h"
 
+
+template <typename T>
+inline T RandomRange(T min, T max) {
+    T scale = rand() / (T) RAND_MAX;
+    return min + scale * ( max - min );
+}
+
+ImVec4 RandomColor() {
+    ImVec4 col;
+    col.x = RandomRange(0.0f,1.0f);
+    col.y = RandomRange(0.0f,1.0f);
+    col.z = RandomRange(0.0f,1.0f);
+    col.w = 1.0f;
+    return col;
+}
+
 // utility structure for realtime plot
 struct ScrollingBuffer {
-    char Id;
+    char Idx;
+    int Plt;
     char Name[32];
     int MaxSize;
     int Offset;
+    ImVec4 Color;
+    ImAxis Yax;
     ImVector<ImVec2> Data;
     ScrollingBuffer(int max_size = 2000) {
-        Id = 0;
-        memset(Name, 0, 32);
+        Idx = 0;
+        Plt = 0;
+        Yax = ImAxis_Y1;
+        Color = RandomColor();
+        memset(Name, 0, sizeof(Name));
         MaxSize = max_size;
         Offset  = 0;
         Data.reserve(MaxSize);
+    }
+    void SetName(const char *name) {
+        snprintf(Name, sizeof(Name), "%s", name);
     }
     void AddPoint(float x, float y) {
         if (Data.size() < MaxSize)
@@ -34,6 +59,10 @@ struct ScrollingBuffer {
             Data[Offset] = ImVec2(x,y);
             Offset =  (Offset + 1) % MaxSize;
         }
+    }
+    void Reset() {
+        Plt = 0;
+        Yax = ImAxis_Y1;
     }
     void Erase() {
         if (Data.size() > 0) {
@@ -228,8 +257,8 @@ bool DataGetParam(const char param, const char *line, const size_t len, int *val
 void SerialMonitorInit() {
 
     for (size_t i = 0; i < NUM_PARAMS; i++) {
-        params[i].Id = 'a'+i;
-        sprintf(params[i].Name, "param %c", params[i].Id);
+        params[i].Idx = 'a'+i;
+        sprintf(params[i].Name, "param %c", params[i].Idx);
     }
 
     if (serial_port == -1) {
@@ -247,6 +276,112 @@ void SerialMonitorInit() {
 void SerialMonitorDestroy() {
     SerialClose(serial_port);
     DataClose(data_file);
+}
+
+void Plots() {
+    static float history = 60.0f;
+    ImGui::SliderFloat("History", &history, 1, 120, "%.1f s");
+
+    // child window to serve as initial source for our DND items
+    ImGui::BeginChild("DND_LEFT",ImVec2(100,400));
+    if (ImGui::Button("Erase Data")) {
+        for (int k = 0; k < NUM_PARAMS; ++k)
+            params[k].Erase();
+    }
+    if (ImGui::Button("Reset Plot")) {
+        for (int k = 0; k < NUM_PARAMS; ++k)
+            params[k].Reset();
+    }
+    for (int k = 0; k < NUM_PARAMS; ++k) {
+        if (params[k].Plt > 0)
+            continue;
+        if (params[k].Data.size() == 0) {
+            ImGui::BeginDisabled();
+        }
+        ImPlot::ItemIcon(params[k].Color); ImGui::SameLine();
+        ImGui::Selectable(params[k].Name, false, 0, ImVec2(100, 0));
+        if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_None)) {
+            ImGui::SetDragDropPayload("MY_DND", &k, sizeof(int));
+            ImPlot::ItemIcon(params[k].Color); ImGui::SameLine();
+            ImGui::TextUnformatted(params[k].Name);
+            ImGui::EndDragDropSource();
+        }
+        if (params[k].Data.size() == 0) {
+            ImGui::EndDisabled();
+        }
+    }
+    ImGui::EndChild();
+    if (ImGui::BeginDragDropTarget()) {
+        if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("MY_DND")) {
+            int i = *(int*)payload->Data; params[i].Reset();
+        }
+        ImGui::EndDragDropTarget();
+    }
+
+    ImGui::SameLine();
+    ImGui::BeginChild("DND_RIGHT",ImVec2(-1,400));
+    // plot 1 (time series)
+    ImPlotAxisFlags flags = ImPlotAxisFlags_NoTickLabels | ImPlotAxisFlags_NoGridLines | ImPlotAxisFlags_NoHighlight;
+    if (ImPlot::BeginPlot("##DND1", ImVec2(-1,400))) {
+        ImPlot::SetupAxisLimits(ImAxis_X1,data_index - history, data_index, ImGuiCond_Always);
+        // ImPlot::SetupAxisLimits(ImAxis_Y1,0,1);
+        ImPlot::SetupAxis(ImAxis_X1, "Elapsed [s]", flags|ImPlotAxisFlags_Lock);
+        ImPlot::SetupAxis(ImAxis_Y1, "[drop here]", flags|ImPlotAxisFlags_AutoFit);
+        ImPlot::SetupAxis(ImAxis_Y2, "[drop here]", flags|ImPlotAxisFlags_AutoFit|ImPlotAxisFlags_Opposite);
+        // ImPlot::SetupAxis(ImAxis_Y3, "[drop here]", flags|ImPlotAxisFlags_Opposite);
+
+        for (int k = 0; k < NUM_PARAMS; ++k) {
+            if (params[k].Plt == 1 && params[k].Data.size() > 0) {
+                ImPlot::SetAxis(params[k].Yax);
+                ImPlot::SetNextLineStyle(params[k].Color);
+                // ImPlot::PlotLine(params[k].Name, &params[k].Data[0].x, &params[k].Data[0].y, params[k].Data.size(), 0, 0, 2 * sizeof(float));
+
+                // ImPlot::SetupAxisLimits(ImAxis_X1,data_index - history, data_index, ImGuiCond_Always);
+                // ImPlot::SetupAxisLimits(ImAxis_Y1,0,1);
+                // ImPlot::SetNextFillStyle(IMPLOT_AUTO_COL,0.5f);
+                // float fc = 0.01f;
+                // ImPlot::PlotLineG("common",SinewaveGetter,&fc,1000);
+                ScrollingBuffer *p = &params[k];
+                // if (p->Data.size()) {
+                    ImPlot::PlotLine(p->Name, &p->Data[0].x, &p->Data[0].y, p->Data.size(), 0, p->Offset, 2*sizeof(float));
+                // }
+
+                // allow legend item labels to be DND sources
+                if (ImPlot::BeginDragDropSourceItem(params[k].Name)) {
+                    ImGui::SetDragDropPayload("MY_DND", &k, sizeof(int));
+                    ImPlot::ItemIcon(params[k].Color); ImGui::SameLine();
+                    ImGui::TextUnformatted(params[k].Name);
+                    ImPlot::EndDragDropSource();
+                }
+            }
+        }
+        // allow the main plot area to be a DND target
+        if (ImPlot::BeginDragDropTargetPlot()) {
+            if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("MY_DND")) {
+                int i = *(int*)payload->Data; params[i].Plt = 1; params[i].Yax = ImAxis_Y1;
+            }
+            ImPlot::EndDragDropTarget();
+        }
+        // allow each y-axis to be a DND target
+        // for (int y = ImAxis_Y1; y <= ImAxis_Y3; ++y) {
+        for (int y = ImAxis_Y1; y <= ImAxis_Y2; ++y) {
+            if (ImPlot::BeginDragDropTargetAxis(y)) {
+                if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("MY_DND")) {
+                    int i = *(int*)payload->Data; params[i].Plt = 1; params[i].Yax = y;
+                }
+                ImPlot::EndDragDropTarget();
+            }
+        }
+        // allow the legend to be a DND target
+        if (ImPlot::BeginDragDropTargetLegend()) {
+            if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("MY_DND")) {
+                int i = *(int*)payload->Data; params[i].Plt = 1; params[i].Yax = ImAxis_Y1;
+            }
+            ImPlot::EndDragDropTarget();
+        }
+        ImPlot::EndPlot();
+    }
+    ImGui::EndChild();
 }
 
 void SerialMonitorWindow(bool* p_open) {
@@ -267,6 +402,7 @@ void SerialMonitorWindow(bool* p_open) {
             num_read = SerialRead1(serial_port, &data_buf[data_len]);
             if (num_read > 0) {
                 if (data_buf[data_len] == '\n') {
+                    data_buf[data_len] = '\0';
                     data_len++;
                     memcpy(last_line, data_buf, data_len);
                     full_line = true;
@@ -281,8 +417,8 @@ void SerialMonitorWindow(bool* p_open) {
                     //     param_b.AddPoint(data_index, value);
                     // }
                     for (size_t i = 0; i < NUM_PARAMS; i++) {
-                        if (params[i].Id != 0) {
-                            if (DataGetParam(params[i].Id, last_line, data_len, &value)) {
+                        if (params[i].Idx != 0) {
+                            if (DataGetParam(params[i].Idx, last_line, data_len, &value)) {
                                 params[i].AddPoint(data_index, value);
                             }
                         }
@@ -291,15 +427,15 @@ void SerialMonitorWindow(bool* p_open) {
                     data_index += .5;
                     data_len = 0;
                 } else {
-                    data_len += num_read;
+                    data_len++;
                 }
             }
         } while (num_read > 0);
     }
 
-    ImGui::Text("DATA: %s", data_buf);
+    ImGui::Text("DATA: '%s'", data_buf);
     ImGui::Text("LEN:  %ld", data_len);
-    ImGui::Text("LINE: %s", last_line);
+    ImGui::Text("LINE: '%s'", last_line);
 
 /*
     static ScrollingBuffer sdata1, sdata2;
@@ -312,8 +448,8 @@ void SerialMonitorWindow(bool* p_open) {
         full_line = false;
     }
 */
-    static float history = 10.0f;
-    ImGui::SliderFloat("History",&history,1,30,"%.1f s");
+    // static float history = 10.0f;
+    // ImGui::SliderFloat("History",&history,1,30,"%.1f s");
     // static ImPlotAxisFlags flags = ImPlotAxisFlags_NoTickLabels;
 
 /*
@@ -333,6 +469,7 @@ void SerialMonitorWindow(bool* p_open) {
 
     // ImGui::Text("param data size: %d", param_a.Data.size());
     // if (param_a.Data.size()) {
+/*
     if (data_index >= 1.0) {
         if (ImPlot::BeginPlot("##Scrolling2", ImVec2(-1,150))) {
             // ImPlot::SetupAxes(nullptr, nullptr, flags, flags);
@@ -342,7 +479,7 @@ void SerialMonitorWindow(bool* p_open) {
             // ImPlot::PlotLine("param A", &param_a.Data[0].x, &param_a.Data[0].y, param_a.Data.size(), 0, param_a.Offset, 2*sizeof(float));
             // ImPlot::PlotLine("param B", &param_b.Data[0].x, &param_b.Data[0].y, param_b.Data.size(), 0, param_b.Offset, 2*sizeof(float));
             for (size_t i = 0; i < NUM_PARAMS; i++) {
-                // if (params[i].Id != 0) {
+                // if (params[i].Idx != 0) {
                 ScrollingBuffer *p = &params[i];
                 if (p->Data.size()) {
                     ImPlot::PlotLine(p->Name, &p->Data[0].x, &p->Data[0].y, p->Data.size(), 0, p->Offset, 2*sizeof(float));
@@ -352,6 +489,46 @@ void SerialMonitorWindow(bool* p_open) {
             ImPlot::EndPlot();
         }
     }
+*/
+/*
+    static ImPlotSubplotFlags flags = ImPlotSubplotFlags_LinkRows | ImPlotSubplotFlags_LinkCols;
+    ImGui::CheckboxFlags("ImPlotSubplotFlags_LinkRows", (unsigned int*)&flags, ImPlotSubplotFlags_LinkRows);
+    ImGui::CheckboxFlags("ImPlotSubplotFlags_LinkCols", (unsigned int*)&flags, ImPlotSubplotFlags_LinkCols);
+    ImGui::CheckboxFlags("ImPlotSubplotFlags_LinkAllX", (unsigned int*)&flags, ImPlotSubplotFlags_LinkAllX);
+    ImGui::CheckboxFlags("ImPlotSubplotFlags_LinkAllY", (unsigned int*)&flags, ImPlotSubplotFlags_LinkAllY);
+
+    // static int rows = NUM_PARAMS;
+    static int rows = 0;
+    for (size_t i = 0; i < NUM_PARAMS; i++) {
+        if (params[i].Data.size()) {
+            rows++;
+        }
+    }
+    if (rows == 0) {
+        rows = 1;
+    }
+    static int cols = 1;
+    if (ImPlot::BeginSubplots("##AxisLinking", rows, cols, ImVec2(-1,800), flags)) {
+        for (int i = 0; i < rows*cols; ++i) {
+            if (ImPlot::BeginPlot("")) {
+                // ImPlot::SetupAxesLimits(0,1000,-1,1);
+                ImPlot::SetupAxisLimits(ImAxis_X1,data_index - history, data_index, ImGuiCond_Always);
+                ImPlot::SetupAxisLimits(ImAxis_Y1,0,1);
+                ImPlot::SetNextFillStyle(IMPLOT_AUTO_COL,0.5f);
+                // float fc = 0.01f;
+                // ImPlot::PlotLineG("common",SinewaveGetter,&fc,1000);
+                ScrollingBuffer *p = &params[i];
+                if (p->Data.size()) {
+                    ImPlot::PlotLine(p->Name, &p->Data[0].x, &p->Data[0].y, p->Data.size(), 0, p->Offset, 2*sizeof(float));
+                }
+                ImPlot::EndPlot();
+            }
+        }
+        ImPlot::EndSubplots();
+    }
+    rows = 0;
+*/
+    Plots();
 
     ImGui::End();
 }
