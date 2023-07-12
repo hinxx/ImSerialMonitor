@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
+#include <time.h>
 
 // Linux headers
 #include <fcntl.h> // Contains file controls like O_RDWR
@@ -73,7 +74,8 @@ struct ScrollingBuffer {
 };
 
 #define DATA_MAX_LEN    100
-char data_buf[DATA_MAX_LEN];
+char tx_data_buf[DATA_MAX_LEN];
+char rx_data_buf[DATA_MAX_LEN];
 char last_line[DATA_MAX_LEN];
 size_t data_len = 0;
 bool full_line = false;
@@ -84,6 +86,7 @@ ScrollingBuffer param_b;
 ScrollingBuffer param_c;
 ScrollingBuffer param_d;
 float data_index = 0;
+struct timespec t0, t1;
 
 #define NUM_PARAMS 10
 ScrollingBuffer params[NUM_PARAMS];
@@ -142,8 +145,8 @@ int SerialOpen(const char *port) {
 
 int SerialWrite(const int fp, const char *write_buf, const size_t len) {
     // Write to serial port
-    unsigned char msg[] = { 'H', 'e', 'l', 'l', 'o', '\r' };
-    int num_bytes = write(fp, msg, sizeof(msg));
+    //unsigned char msg[] = { 'H', 'e', 'l', 'l', 'o', '\r' };
+    int num_bytes = write(fp, write_buf, len);
     if (num_bytes < 0) {
         printf("write() error: %s\n", strerror(errno));
         return -1;
@@ -270,7 +273,8 @@ void SerialMonitorInit() {
         data_file = DataOpen("testfile.txt");
     }
 
-
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
 }
 
 void SerialMonitorDestroy() {
@@ -395,16 +399,30 @@ void SerialMonitorWindow(bool* p_open) {
     }
 
     ImGui::Text("This is some useful text.");
+
+    static int setting_1 = 123;
+    ImGui::InputInt("setting_1", &setting_1);
+    static int setting_2 = 888;
+    ImGui::InputInt("setting_2", &setting_2);
+
     if (serial_port > 0) {
-        // int num_read = SerialRead(serial_port, data_buf, &data_len);
+        // send settings
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        if (((t1.tv_sec*1000000000+t1.tv_nsec) - (t0.tv_sec*1000000000+t0.tv_nsec)) > 1000000000/2) {
+            snprintf(tx_data_buf, sizeof(tx_data_buf), "A:%d,B:%d\n", setting_1, setting_2);
+            int num_write = SerialWrite(serial_port, tx_data_buf, strlen(tx_data_buf));
+            clock_gettime(CLOCK_MONOTONIC, &t0);
+        }
+
+        // read data if any
         int num_read = 0;
         do {
-            num_read = SerialRead1(serial_port, &data_buf[data_len]);
+            num_read = SerialRead1(serial_port, &rx_data_buf[data_len]);
             if (num_read > 0) {
-                if (data_buf[data_len] == '\n') {
-                    data_buf[data_len] = '\0';
+                if (rx_data_buf[data_len] == '\n') {
+                    rx_data_buf[data_len] = '\0';
                     data_len++;
-                    memcpy(last_line, data_buf, data_len);
+                    memcpy(last_line, rx_data_buf, data_len);
                     full_line = true;
                     last_line[data_len] = '\0';
 
@@ -433,9 +451,10 @@ void SerialMonitorWindow(bool* p_open) {
         } while (num_read > 0);
     }
 
-    ImGui::Text("DATA: '%s'", data_buf);
-    ImGui::Text("LEN:  %ld", data_len);
-    ImGui::Text("LINE: '%s'", last_line);
+    ImGui::Text("TX DATA: [%3ld] '%s'", strlen(tx_data_buf), tx_data_buf);
+    ImGui::Text("RX DATA: '%s'", rx_data_buf);
+    ImGui::Text("RX LINE: [%3ld] '%s'", data_len, last_line);
+    // ImGui::Text("LINE: '%s'", last_line);
 
 /*
     static ScrollingBuffer sdata1, sdata2;
