@@ -74,10 +74,17 @@ struct ScrollingBuffer {
 };
 
 #define DATA_MAX_LEN    100
-char tx_data_buf[DATA_MAX_LEN];
-char rx_data_buf[DATA_MAX_LEN];
+u_int8_t tx_data_buf[DATA_MAX_LEN];
+size_t tx_data_len = 0;
+char tx_data_hex[3*DATA_MAX_LEN];
+
+u_int8_t rx_data_buf[DATA_MAX_LEN];
+char rx_data_hex[3*DATA_MAX_LEN];
 char last_line[DATA_MAX_LEN];
-size_t data_len = 0;
+size_t rx_data_cnt = 0;
+size_t rx_data_len = 0;
+u_int16_t rx_data_chksum = 0;
+
 bool full_line = false;
 int serial_port = -1;
 int data_file = -1;
@@ -94,7 +101,10 @@ ScrollingBuffer params[NUM_PARAMS];
 int SerialOpen(const char *port) {
     // Open the serial port. Change device path as needed (currently set to an standard FTDI USB-UART cable type device)
     int fp = open(port, O_RDWR);
-
+    if (fp < 0) {
+        printf("Error %i from open: %s\n", errno, strerror(errno));
+        return -1;
+    }
     // Create new termios struct, we call it 'tty' for convention
     struct termios tty;
 
@@ -106,7 +116,7 @@ int SerialOpen(const char *port) {
 
     tty.c_cflag &= ~PARENB; // Clear parity bit, disabling parity (most common)
     tty.c_cflag &= ~CSTOPB; // Clear stop field, only one stop bit used in communication (most common)
-    tty.c_cflag &= ~CSIZE; // Clear all bits that set the data size 
+    tty.c_cflag &= ~CSIZE; // Clear all bits that set the data size
     tty.c_cflag |= CS8; // 8 bits per byte (most common)
     tty.c_cflag &= ~CRTSCTS; // Disable RTS/CTS hardware flow control (most common)
     tty.c_cflag |= CREAD | CLOCAL; // Turn on READ & ignore ctrl lines (CLOCAL = 1)
@@ -131,8 +141,14 @@ int SerialOpen(const char *port) {
     // Set in/out baud rate to be 9600
     //cfsetispeed(&tty, B9600);
     //cfsetospeed(&tty, B9600);
-    cfsetispeed(&tty, B115200);
-    cfsetospeed(&tty, B115200);
+    if (cfsetispeed(&tty, B57600) != 0) {
+        printf("Error %i from cfsetispeed: %s\n", errno, strerror(errno));
+        return -1;
+    }
+    if (cfsetospeed(&tty, B57600) != 0) {
+        printf("Error %i from cfsetospeed: %s\n", errno, strerror(errno));
+        return -1;
+    }
 
     // Save tty settings, also checking for error
     if (tcsetattr(fp, TCSANOW, &tty) != 0) {
@@ -140,10 +156,13 @@ int SerialOpen(const char *port) {
         return -1;
     }
 
+    // sleep(2); //required to make flush work, for some reason
+    tcflush(fp, TCIOFLUSH);
+
     return fp;
 }
 
-int SerialWrite(const int fp, const char *write_buf, const size_t len) {
+int SerialWrite(const int fp, const u_int8_t *write_buf, const size_t len) {
     // Write to serial port
     //unsigned char msg[] = { 'H', 'e', 'l', 'l', 'o', '\r' };
     int num_bytes = write(fp, write_buf, len);
@@ -179,7 +198,7 @@ int SerialRead(const int fp, const char *read_buf, const size_t *len) {
         printf("read() timeout..\n");
         return 0;
     }
-    
+
     // read_buf[num_bytes] = '\0';
     // Here we assume we received ASCII data, but you might be sending raw bytes (in that case, don't try and
     // print it to the screen like this!)
@@ -189,11 +208,11 @@ int SerialRead(const int fp, const char *read_buf, const size_t *len) {
         printf("%c", read_buf[i]);
     }
     printf("\n");
-    
+
     return num_bytes;
 };
 
-int SerialRead1(const int fp, char *read_buf) {
+int SerialRead1(const int fp, u_int8_t *read_buf) {
     int num_bytes = read(fp, read_buf, 1);
     // printf("read() done!\n");
 
@@ -206,13 +225,13 @@ int SerialRead1(const int fp, char *read_buf) {
         // printf("read() timeout..\n");
         return 0;
     }
-    
+
     // printf("read(): [%d] ", num_bytes);
     // for (int i = 0; i < num_bytes; i++) {
     //     printf("%c", read_buf[i]);
     // }
     // printf("\n");
-    
+
     return num_bytes;
 };
 
@@ -263,10 +282,17 @@ void SerialMonitorInit() {
         params[i].Idx = 'a'+i;
         sprintf(params[i].Name, "param %c", params[i].Idx);
     }
+    params[0].SetName("Bat Cur");
+    params[1].SetName("Speed");
+    params[2].SetName("Voltage");
+    params[3].SetName("KV");
+    params[4].SetName("Iq");
+    params[5].SetName("Id");
+    params[6].SetName("Temp Iq");
 
     if (serial_port == -1) {
         serial_port = SerialOpen("/dev/ttyUSB0");
-        data_len = 0;
+        // data_len = 0;
     }
 
     if (data_file == -1) {
@@ -400,60 +426,174 @@ void SerialMonitorWindow(bool* p_open) {
 
     ImGui::Text("This is some useful text.");
 
-    static int setting_1 = 123;
-    ImGui::InputInt("setting_1", &setting_1);
-    static int setting_2 = 888;
-    ImGui::InputInt("setting_2", &setting_2);
+    static bool send = false;
+
+    static bool monitor = false;
+    if (ImGui::Checkbox("Monitor", &monitor)) {
+        tcflush(serial_port, TCIOFLUSH);
+        send = true;
+    }
+    static int min_fw_speed = 20;
+    if (ImGui::InputInt("Min FW speed", &min_fw_speed)) {
+        send = true;
+    }
+    static int max_fw_speed = 50;
+    if (ImGui::InputInt("max_fw_speed", &max_fw_speed)) {
+        send = true;
+    }
 
     if (serial_port > 0) {
         // send settings
-        clock_gettime(CLOCK_MONOTONIC, &t1);
-        if (((t1.tv_sec*1000000000+t1.tv_nsec) - (t0.tv_sec*1000000000+t0.tv_nsec)) > 1000000000/2) {
-            snprintf(tx_data_buf, sizeof(tx_data_buf), "A:%d,B:%d\n", setting_1, setting_2);
-            int num_write = SerialWrite(serial_port, tx_data_buf, strlen(tx_data_buf));
-            clock_gettime(CLOCK_MONOTONIC, &t0);
+        // clock_gettime(CLOCK_MONOTONIC, &t1);
+        // if (((t1.tv_sec*1000000000+t1.tv_nsec) - (t0.tv_sec*1000000000+t0.tv_nsec)) > 1000000000/2) {
+        //     snprintf(tx_data_buf, sizeof(tx_data_buf), "A:%d,B:%d\n", setting_1, setting_2);
+        //     int num_write = SerialWrite(serial_port, tx_data_buf, strlen(tx_data_buf));
+        //     clock_gettime(CLOCK_MONOTONIC, &t0);
+        // }
+
+        if (send) {
+            unsigned o = 0;
+            tx_data_buf[o++] = 0x3a;
+            tx_data_buf[o++] = 0x1a;
+            tx_data_buf[o++] = 0x99;
+            tx_data_buf[o++] = 0x03;
+            tx_data_buf[o++] = (u_int8_t)monitor & 0xFF;
+            tx_data_buf[o++] = min_fw_speed & 0xFF;
+            tx_data_buf[o++] = max_fw_speed & 0xFF;
+            u_int16_t chksum = 0;
+            for (unsigned i = 1; i < o; i++) {
+                chksum += tx_data_buf[i];
+            }
+            tx_data_buf[o++] = chksum & 0xFF;
+            tx_data_buf[o++] = (chksum >> 8) & 0xFF;
+            tx_data_buf[o++] = 0x0d;
+            tx_data_buf[o++] = 0x0a;
+            tx_data_len = o;
+            o = 0;
+            for (unsigned i = 0; i < tx_data_len; i++) {
+                o += sprintf(&tx_data_hex[o], "%02x ", tx_data_buf[i]);
+            }
+            tx_data_hex[o] = '\0';
+            printf("TX data [%ld] : %s\n", tx_data_len, tx_data_hex);
+            int num_write = SerialWrite(serial_port, tx_data_buf, tx_data_len);
+            if (num_write == (int)tx_data_len) {
+                send = false;
+            }
         }
 
         // read data if any
         int num_read = 0;
         do {
-            num_read = SerialRead1(serial_port, &rx_data_buf[data_len]);
-            if (num_read > 0) {
-                if (rx_data_buf[data_len] == '\n') {
-                    rx_data_buf[data_len] = '\0';
-                    data_len++;
-                    memcpy(last_line, rx_data_buf, data_len);
-                    full_line = true;
-                    last_line[data_len] = '\0';
+            num_read = SerialRead1(serial_port, &rx_data_buf[rx_data_cnt]);
+            // if (num_read > 0) {
+            //     if (rx_data_buf[data_len] == '\n') {
+            //         rx_data_buf[data_len] = '\0';
+            //         data_len++;
+            //         memcpy(last_line, rx_data_buf, data_len);
+            //         full_line = true;
+            //         last_line[data_len] = '\0';
 
-                    int value;
-                    DataWrite(data_file, last_line, strlen(last_line));
-                    // if (DataGetParam('a', last_line, data_len, &value)) {
-                    //     param_a.AddPoint(data_index, value);
-                    // }
-                    // if (DataGetParam('b', last_line, data_len, &value)) {
-                    //     param_b.AddPoint(data_index, value);
-                    // }
-                    for (size_t i = 0; i < NUM_PARAMS; i++) {
-                        if (params[i].Idx != 0) {
-                            if (DataGetParam(params[i].Idx, last_line, data_len, &value)) {
-                                params[i].AddPoint(data_index, value);
-                            }
-                        }
+            //         int value;
+            //         DataWrite(data_file, last_line, strlen(last_line));
+            //         for (size_t i = 0; i < NUM_PARAMS; i++) {
+            //             if (params[i].Idx != 0) {
+            //                 if (DataGetParam(params[i].Idx, last_line, data_len, &value)) {
+            //                     params[i].AddPoint(data_index, value);
+            //                 }
+            //             }
+            //         }
+
+            //         data_index += .5;
+            //         data_len = 0;
+            //     } else {
+            //         data_len++;
+            //     }
+            // }
+
+            if (num_read > 0) {
+                // TODO: Check for buffer overflow!!!!
+                if (rx_data_cnt >= DATA_MAX_LEN) {
+                    rx_data_cnt = 0;
+                }
+                if ((rx_data_cnt > 4) && (rx_data_buf[rx_data_cnt-1] == '\r') && (rx_data_buf[rx_data_cnt] == '\n')) {
+                    rx_data_cnt++;
+                    u_int16_t chksum = 0;
+                    for (unsigned i = 1; i < rx_data_cnt - 4; i++) {
+                        chksum += rx_data_buf[i];
+                    }
+                    u_int16_t rx_chksum = (rx_data_buf[rx_data_cnt-4]) | (rx_data_buf[rx_data_cnt-3] << 8);
+                    if (rx_chksum != chksum) {
+                        printf("chksum mismatch: %04x %04x\n", rx_chksum, chksum);
+                    }
+                    rx_data_chksum = chksum;
+                    unsigned o = 0;
+                    for (unsigned i = 0; i < rx_data_cnt; i++) {
+                        o += sprintf(&rx_data_hex[o], "%02x ", rx_data_buf[i]);
+                    }
+                    rx_data_hex[o] = '\0';
+                    printf("RX data [%ld] : %s\n", rx_data_cnt, rx_data_hex);
+
+                    if (rx_data_buf[2] == 0x88) {
+                        int value;
+                        value = ((int)rx_data_buf[4] << 24) |
+                                ((int)rx_data_buf[5] << 16) |
+                                ((int)rx_data_buf[6] << 8) |
+                                ((int)rx_data_buf[7]);
+                        params[0].AddPoint(data_index, value);
+
+                        value = ((int)rx_data_buf[8] << 24) |
+                                ((int)rx_data_buf[9] << 16) |
+                                ((int)rx_data_buf[10] << 8) |
+                                ((int)rx_data_buf[11]);
+                        params[1].AddPoint(data_index, value);
+
+                        value = ((int)rx_data_buf[12] << 24) |
+                                ((int)rx_data_buf[13] << 16) |
+                                ((int)rx_data_buf[14] << 8) |
+                                ((int)rx_data_buf[15]);
+                        params[2].AddPoint(data_index, value);
+
+                        value = ((int)rx_data_buf[16] << 24) |
+                                ((int)rx_data_buf[17] << 16) |
+                                ((int)rx_data_buf[18] << 8) |
+                                ((int)rx_data_buf[19]);
+                        params[3].AddPoint(data_index, value);
+
+                        value = ((int)rx_data_buf[20] << 24) |
+                                ((int)rx_data_buf[21] << 16) |
+                                ((int)rx_data_buf[22] << 8) |
+                                ((int)rx_data_buf[23]);
+                        params[4].AddPoint(data_index, value);
+
+                        value = ((int)rx_data_buf[24] << 24) |
+                                ((int)rx_data_buf[25] << 16) |
+                                ((int)rx_data_buf[26] << 8) |
+                                ((int)rx_data_buf[27]);
+                        params[5].AddPoint(data_index, value);
+
+                        value = ((int)rx_data_buf[28] << 24) |
+                                ((int)rx_data_buf[29] << 16) |
+                                ((int)rx_data_buf[30] << 8) |
+                                ((int)rx_data_buf[31]);
+                        params[6].AddPoint(data_index, value);
+
+                        data_index += .1;
                     }
 
-                    data_index += .5;
-                    data_len = 0;
+                    rx_data_len = rx_data_cnt;
+                    rx_data_cnt = 0;
                 } else {
-                    data_len++;
+                    rx_data_cnt++;
                 }
             }
         } while (num_read > 0);
     }
 
-    ImGui::Text("TX DATA: [%3ld] '%s'", strlen(tx_data_buf), tx_data_buf);
-    ImGui::Text("RX DATA: '%s'", rx_data_buf);
-    ImGui::Text("RX LINE: [%3ld] '%s'", data_len, last_line);
+    ImGui::Text("TX DATA: [%3ld] '%s'", tx_data_len, tx_data_hex);
+    ImGui::Text("RX DATA: [%3ld] '%s'", rx_data_len, rx_data_hex);
+    ImGui::Text("RX CHKSUM: %04x", rx_data_chksum);
+    // ImGui::Text("RX DATA: '%s'", rx_data_buf);
+    // ImGui::Text("RX LINE: [%3ld] '%s'", rx_data_len, last_line);
     // ImGui::Text("LINE: '%s'", last_line);
 
 /*
@@ -504,7 +644,7 @@ void SerialMonitorWindow(bool* p_open) {
                     ImPlot::PlotLine(p->Name, &p->Data[0].x, &p->Data[0].y, p->Data.size(), 0, p->Offset, 2*sizeof(float));
                 }
             }
-            
+
             ImPlot::EndPlot();
         }
     }

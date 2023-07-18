@@ -84,8 +84,14 @@ endif
 %.o:$(IMPLOT_DIR)/%.cpp
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
-all: $(EXE)
+all: $(IMGUI_DIR) $(IMPLOT_DIR) $(EXE)
 	@echo Build complete for $(ECHO_MESSAGE)
+
+$(IMGUI_DIR):
+	git clone https://github.com/ocornut/imgui.git
+
+$(IMPLOT_DIR):
+	git clone https://github.com/epezent/implot.git
 
 $(EXE): $(OBJS)
 	$(CXX) -o $@ $^ $(CXXFLAGS) $(LIBS)
